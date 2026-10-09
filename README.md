@@ -1,6 +1,5 @@
 # AlmaLinux 9 Node.js VPS DeployKit
 
-[![CI & Deployment Pipeline Verification](https://github.com/jdymitarai/almalinux-nodejs-vps-deploykit/actions/workflows/ci.yml/badge.svg)](https://github.com/jdymitarai/almalinux-nodejs-vps-deploykit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Target OS: AlmaLinux 9 / RHEL 9](https://img.shields.io/badge/Target%20OS-AlmaLinux%209%20%7C%20RHEL%209-orange.svg)](https://almalinux.org/)
 [![Node.js LTS](https://img.shields.io/badge/Node.js-18%20%7C%2020%20%7C%2022%20LTS-green.svg)](https://nodejs.org/)
@@ -125,9 +124,8 @@ flowchart TD
 
 ```
 almalinux-nodejs-vps-deploykit/
-├── .github/
-│   └── workflows/
-│       └── ci.yml                 # Automated syntax, linting & CI test suite
+├── ci/
+│   └── github-actions-ci.yml      # CI workflow template (syntax, linting & tests)
 ├── sample-app/                    # Production-ready zero-bloat reference server
 │   ├── test/
 │   │   └── server.test.js         # Integration tests for healthcheck & lifecycle
