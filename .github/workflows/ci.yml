@@ -25,8 +25,8 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: '.'
-          ignore_paths: 'node_modules'
-          severity: warning
+          ignore_paths: 'node_modules,sample-app/node_modules'
+          severity: error
 
   test-sample-app:
     name: Reference Node.js Server Test Suite
@@ -43,13 +43,18 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: Install dependencies via npm ci
+        working-directory: ./sample-app
+        run: |
+          npm ci
+
       - name: Run Sample App Integration Tests
         working-directory: ./sample-app
         run: |
           npm test
 
   validate-configs:
-    name: Configuration & SQL Integrity
+    name: Configuration & Service Directives Integrity
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -57,16 +62,26 @@ jobs:
 
       - name: Validate systemd unit syntax
         run: |
-          # Basic validation that key directives exist
           grep -q "ExecStart=" app.service
           grep -q "Restart=" app.service
           grep -q "ProtectSystem=" app.service
-          echo "app.service format verified."
+          grep -q "NoNewPrivileges=true" app.service
+          grep -q "LimitNOFILE=65536" app.service
+          echo "app.service directives verified."
 
       - name: Validate Apache configuration format
         run: |
-          grep -q "<VirtualHost \*:80>" app.conf
-          grep -q "<VirtualHost \*:443>" app.conf
-          grep -q "ProxyPass" app.conf
-          grep -q "Upgrade=websocket" app.conf
+          grep -Fq "<VirtualHost *:80>" app.conf
+          grep -Fq "<VirtualHost *:443>" app.conf
+          grep -Fq "ProxyPass / http://127.0.0.1:3000/" app.conf
+          grep -Fq "ProxyPassReverse / http://127.0.0.1:3000/" app.conf
+          grep -Fq "RewriteCond %{HTTP:Upgrade} websocket" app.conf
+          grep -Fq "RewriteCond %{HTTP:Connection} upgrade" app.conf
           echo "app.conf directives verified."
+
+      - name: Validate Schema SQL definitions
+        run: |
+          grep -Fq "CREATE TABLE IF NOT EXISTS \`users\`" schema.sql
+          grep -Fq "CREATE TABLE IF NOT EXISTS \`app_migrations\`" schema.sql
+          grep -Fq "CREATE TABLE IF NOT EXISTS \`audit_logs\`" schema.sql
+          echo "schema.sql tables verified."

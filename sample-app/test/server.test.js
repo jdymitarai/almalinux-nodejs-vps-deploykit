@@ -47,6 +47,17 @@ test('Sample App Health and Lifecycle Verification', async (t) => {
         assert.equal(data.status, 'operational');
     });
 
+    await t.test('Signal handling: SIGHUP reload verification', async () => {
+        if (process.platform !== 'win32') {
+            child.kill('SIGHUP');
+            await new Promise((r) => setTimeout(r, 150));
+            const res = await fetch(`http://127.0.0.1:${testPort}/health`);
+            assert.equal(res.status, 200);
+        } else {
+            assert.ok(true);
+        }
+    });
+
     await t.test('Graceful shutdown on SIGTERM', async () => {
         const exitPromise = new Promise((resolve) => {
             child.on('exit', (code, signal) => resolve({ code, signal }));

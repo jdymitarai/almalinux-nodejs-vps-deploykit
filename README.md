@@ -124,12 +124,14 @@ flowchart TD
 
 ```
 almalinux-nodejs-vps-deploykit/
-├── ci/
-│   └── github-actions-ci.yml      # CI workflow template (syntax, linting & tests)
+├── .github/
+│   └── workflows/
+│       └── ci.yml                 # GitHub Actions CI workflow (syntax, linting & tests)
 ├── sample-app/                    # Production-ready zero-bloat reference server
 │   ├── test/
 │   │   └── server.test.js         # Integration tests for healthcheck & lifecycle
 │   ├── package.json               # Node.js manifest with test scripts
+│   ├── package-lock.json          # Dependency lockfile for reproducible npm ci
 │   ├── README.md                  # Sample application documentation
 │   └── server.js                  # Pure Node.js server with graceful shutdown
 ├── .env.example                   # Secure environment configuration template

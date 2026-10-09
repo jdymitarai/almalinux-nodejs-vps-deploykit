@@ -146,18 +146,21 @@ EOF
     systemctl restart mariadb
 fi
 
-# 3. Create isolated database and user with least privilege
+# 3. Create isolated database and user with least privilege (both socket & loopback)
 log_info "Provisioning database '${DB_NAME}' with UTF8MB4 collation..."
 run_admin_sql "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
-log_info "Provisioning isolated user '${DB_USER}'@'localhost'..."
+log_info "Provisioning isolated user '${DB_USER}' for 'localhost' and '127.0.0.1'..."
 run_admin_sql "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';"
 run_admin_sql "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';"
+run_admin_sql "CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASSWORD}';"
+run_admin_sql "ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASSWORD}';"
 
-log_info "Applying least-privilege grants on '${DB_NAME}'.* to '${DB_USER}'@'localhost'..."
+log_info "Applying least-privilege grants on '${DB_NAME}'.*..."
 run_admin_sql "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, REFERENCES, LOCK TABLES, EXECUTE ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';"
+run_admin_sql "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, REFERENCES, LOCK TABLES, EXECUTE ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';"
 run_admin_sql "FLUSH PRIVILEGES;"
-log_success "User permissions configured."
+log_success "User permissions configured for both socket (localhost) and TCP (127.0.0.1)."
 
 # 4. Import schema
 if [[ -f "${SCHEMA_FILE}" ]]; then
@@ -170,10 +173,23 @@ fi
 
 # 5. Verify application credentials
 log_info "Verifying application user authentication against database..."
+AUTH_OK=1
+
 if "${DB_CLIENT}" -u "${DB_USER}" "-p${DB_PASSWORD}" -h 127.0.0.1 -D "${DB_NAME}" -e "SELECT 1;" >/dev/null 2>&1; then
-    log_success "Authentication verification successful! Application can connect to MariaDB."
+    log_success "TCP loopback authentication (127.0.0.1) verified successfully."
 else
-    log_error "Connection test failed with application user credentials."
+    log_error "TCP loopback connection test failed for '${DB_USER}'@'127.0.0.1'."
+    AUTH_OK=0
+fi
+
+if "${DB_CLIENT}" -u "${DB_USER}" "-p${DB_PASSWORD}" -h localhost -D "${DB_NAME}" -e "SELECT 1;" >/dev/null 2>&1; then
+    log_success "Unix domain socket authentication (localhost) verified successfully."
+else
+    log_warn "Unix domain socket test was skipped or failed; continuing if TCP loopback is functional."
+fi
+
+if [[ "${AUTH_OK}" -ne 1 ]]; then
+    log_error "MariaDB verification failed. Please review user permissions and password."
     exit 1
 fi
 

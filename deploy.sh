@@ -25,15 +25,7 @@ KEEP_RELEASES="${KEEP_RELEASES:-5}"
 PORT="${PORT:-3000}"
 HEALTHCHECK_RETRIES="${HEALTHCHECK_RETRIES:-10}"
 HEALTHCHECK_DELAY="${HEALTHCHECK_DELAY:-2}"
-
-# Source app directory to deploy (defaults to sample-app if current dir doesn't contain package.json)
-if [[ -f "${SCRIPT_DIR}/package.json" ]]; then
-    SOURCE_APP_DIR="${SCRIPT_DIR}"
-elif [[ -d "${SCRIPT_DIR}/sample-app" && -f "${SCRIPT_DIR}/sample-app/package.json" ]]; then
-    SOURCE_APP_DIR="${SCRIPT_DIR}/sample-app"
-else
-    SOURCE_APP_DIR="${SCRIPT_DIR}"
-fi
+CLI_SOURCE_DIR=""
 
 # Color Palette for CLI output
 C_RESET='\033[0m'
@@ -57,6 +49,48 @@ log_error() {
 
 log_success() {
     echo -e "${C_GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] [SUCCESS]${C_RESET} $*"
+}
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Options:
+  -s, --source PATH        Path to application source directory (default: sample-app or script dir)
+  -p, --port PORT          Application HTTP port (default: ${PORT})
+  -k, --keep NUM           Number of historical releases to retain (default: ${KEEP_RELEASES})
+  --help                   Display this help message
+EOF
+    exit 0
+}
+
+# Parse CLI options
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -s|--source) CLI_SOURCE_DIR="$2"; shift 2 ;;
+            -p|--port) PORT="$2"; shift 2 ;;
+            -k|--keep) KEEP_RELEASES="$2"; shift 2 ;;
+            --help) usage ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+        esac
+    done
+}
+
+# Resolve source application directory
+resolve_source_app_dir() {
+    if [[ -n "${CLI_SOURCE_DIR}" && -d "${CLI_SOURCE_DIR}" ]]; then
+        SOURCE_APP_DIR="$(cd "${CLI_SOURCE_DIR}" && pwd)"
+    elif [[ -n "${APP_SOURCE_DIR:-}" && -d "${APP_SOURCE_DIR}" ]]; then
+        SOURCE_APP_DIR="$(cd "${APP_SOURCE_DIR}" && pwd)"
+    elif [[ -f "${SCRIPT_DIR}/package.json" ]]; then
+        SOURCE_APP_DIR="${SCRIPT_DIR}"
+    elif [[ -d "${SCRIPT_DIR}/sample-app" && -f "${SCRIPT_DIR}/sample-app/package.json" ]]; then
+        SOURCE_APP_DIR="${SCRIPT_DIR}/sample-app"
+    else
+        SOURCE_APP_DIR="${SCRIPT_DIR}"
+    fi
+    log_info "Application source path resolved: ${SOURCE_APP_DIR}"
 }
 
 # Trap unexpected errors
@@ -135,8 +169,11 @@ preflight_checks() {
         selinux_mode="$(getenforce)"
         log_info "SELinux mode: ${selinux_mode}"
         if [[ "${selinux_mode}" =~ ^(Enforcing|Permissive)$ ]]; then
-            log_info "Ensuring SELinux boolean 'httpd_can_network_connect' is enabled for reverse proxying..."
-            if command -v setsebool >/dev/null 2>&1; then
+            log_info "Checking SELinux boolean 'httpd_can_network_connect'..."
+            if command -v getsebool >/dev/null 2>&1 && getsebool httpd_can_network_connect 2>/dev/null | grep -q '--> on'; then
+                log_info "SELinux boolean 'httpd_can_network_connect' is already enabled."
+            elif command -v setsebool >/dev/null 2>&1; then
+                log_info "Enabling SELinux boolean 'httpd_can_network_connect' for reverse proxying..."
                 setsebool -P httpd_can_network_connect 1 || log_warn "Failed to set httpd_can_network_connect boolean."
             fi
         fi
@@ -180,15 +217,25 @@ setup_system_user_and_dirs() {
     mkdir -p "${RELEASES_DIR}"
     mkdir -p "${SHARED_DIR}"
     mkdir -p "${SHARED_DIR}/logs"
+    mkdir -p "${SHARED_DIR}/.npm-cache"
 
     # Enforce strict 750 directory permission isolation
     chmod 750 "${DEPLOY_ROOT}"
     chmod 750 "${RELEASES_DIR}"
     chmod 750 "${SHARED_DIR}"
     chmod 750 "${SHARED_DIR}/logs"
+    chmod 750 "${SHARED_DIR}/.npm-cache"
 
     # Ensure app owns deployment root
     chown -R "${APP_USER}:${APP_GROUP}" "${DEPLOY_ROOT}"
+
+    # Restore SELinux security context on deployment directory if SELinux is active
+    if command -v restorecon >/dev/null 2>&1 && command -v getenforce >/dev/null 2>&1; then
+        if [[ "$(getenforce)" =~ ^(Enforcing|Permissive)$ ]]; then
+            restorecon -R "${DEPLOY_ROOT}" >/dev/null 2>&1 || true
+        fi
+    fi
+
     log_success "Directory structure created with chmod 750 isolation."
 }
 
@@ -253,14 +300,15 @@ deploy_release() {
     ln -sfn "${SHARED_DIR}/.env" "${release_dir}/.env"
     ln -sfn "${SHARED_DIR}/logs" "${release_dir}/logs"
 
-    # Install production dependencies cleanly
+    # Install production dependencies cleanly with isolated npm cache and HOME
+    local npm_cache_dir="${SHARED_DIR}/.npm-cache"
     log_info "Installing production dependencies via npm ci..."
     cd "${release_dir}"
     if [[ -f "${release_dir}/package-lock.json" ]]; then
-        su -s /bin/bash "${APP_USER}" -c "cd '${release_dir}' && npm ci --omit=dev --no-audit --no-fund"
+        su -s /bin/bash "${APP_USER}" -c "export HOME='${DEPLOY_ROOT}' && export npm_config_cache='${npm_cache_dir}' && cd '${release_dir}' && npm ci --omit=dev --no-audit --no-fund"
     elif [[ -f "${release_dir}/package.json" ]]; then
         log_warn "package-lock.json not found; running npm install --omit=dev..."
-        su -s /bin/bash "${APP_USER}" -c "cd '${release_dir}' && npm install --omit=dev --no-audit --no-fund"
+        su -s /bin/bash "${APP_USER}" -c "export HOME='${DEPLOY_ROOT}' && export npm_config_cache='${npm_cache_dir}' && cd '${release_dir}' && npm install --omit=dev --no-audit --no-fund"
     fi
 
     # Fix ownership of entire release directory
@@ -270,15 +318,19 @@ deploy_release() {
     if [[ -L "${CURRENT_LINK}" ]]; then
         local previous_target
         previous_target="$(readlink -f "${CURRENT_LINK}" || true)"
-        if [[ -d "${previous_target}" ]]; then
-            ln -sfn "${previous_target}" "${PREVIOUS_LINK}"
+        if [[ -d "${previous_target}" && "${previous_target}" != "${release_dir}" ]]; then
+            local tmp_prev="${DEPLOY_ROOT}/prev_tmp_$$"
+            ln -sfn "${previous_target}" "${tmp_prev}"
+            mv -Tf "${tmp_prev}" "${PREVIOUS_LINK}"
             log_info "Updated rollback target -> ${previous_target}"
         fi
     fi
 
-    # Switch current symlink atomically to new release
-    ln -sfn "${release_dir}" "${CURRENT_LINK}"
-    log_success "Active release symlink switched to: ${release_dir}"
+    # Switch current symlink atomically to new release using temporary link + rename(2)
+    local tmp_link="${DEPLOY_ROOT}/current_tmp_$$"
+    ln -sfn "${release_dir}" "${tmp_link}"
+    mv -Tf "${tmp_link}" "${CURRENT_LINK}"
+    log_success "Active release symlink atomically switched to: ${release_dir}"
 }
 
 # ==============================================================================
@@ -291,6 +343,28 @@ configure_and_restart_services() {
     if [[ -f "${SCRIPT_DIR}/app.service" ]]; then
         log_info "Installing systemd unit file to ${SYSTEMD_FILE}..."
         cp "${SCRIPT_DIR}/app.service" "${SYSTEMD_FILE}"
+
+        # Detect container virtualization (OpenVZ/LXC/cPanel containers) and adjust sandboxing if needed
+        if command -v systemd-detect-virt >/dev/null 2>&1; then
+            if systemd-detect-virt --container >/dev/null 2>&1; then
+                log_warn "Container virtualization detected ($(systemd-detect-virt)). Relaxing kernel namespace sandbox directives..."
+                sed -i 's/^ProtectKernelTunables=true/# ProtectKernelTunables=true (container compatibility)/' "${SYSTEMD_FILE}"
+                sed -i 's/^ProtectKernelModules=true/# ProtectKernelModules=true (container compatibility)/' "${SYSTEMD_FILE}"
+                sed -i 's/^ProtectControlGroups=true/# ProtectControlGroups=true (container compatibility)/' "${SYSTEMD_FILE}"
+            fi
+        fi
+
+        # Adapt entry point if server.js is absent but index.js or app.js exists
+        if [[ ! -f "${CURRENT_LINK}/server.js" ]]; then
+            if [[ -f "${CURRENT_LINK}/index.js" ]]; then
+                log_info "Detected entry point 'index.js'; updating ExecStart in ${SYSTEMD_FILE}..."
+                sed -i 's|/server.js|/index.js|g' "${SYSTEMD_FILE}"
+            elif [[ -f "${CURRENT_LINK}/app.js" ]]; then
+                log_info "Detected entry point 'app.js'; updating ExecStart in ${SYSTEMD_FILE}..."
+                sed -i 's|/server.js|/app.js|g' "${SYSTEMD_FILE}"
+            fi
+        fi
+
         chmod 644 "${SYSTEMD_FILE}"
         systemctl daemon-reload
         systemctl enable "${SYSTEMD_SERVICE}"
@@ -302,6 +376,18 @@ configure_and_restart_services() {
             log_info "Deploying Apache reverse proxy configuration to ${APACHE_CONF_FILE}..."
             cp "${SCRIPT_DIR}/app.conf" "${APACHE_CONF_FILE}"
             chmod 644 "${APACHE_CONF_FILE}"
+
+            # Check if default configured SSL certificate exists; if not, fallback to AlmaLinux self-signed cert
+            local configured_cert
+            configured_cert="$(grep -E '^\s*SSLCertificateFile' "${APACHE_CONF_FILE}" | awk '{print $2}' | head -n1 || true)"
+            if [[ -n "${configured_cert}" && ! -f "${configured_cert}" ]]; then
+                if [[ -f "/etc/pki/tls/certs/localhost.crt" && -f "/etc/pki/tls/private/localhost.key" ]]; then
+                    log_warn "Configured SSL certificate '${configured_cert}' not found on disk."
+                    log_info "Bootstrapping with AlmaLinux default self-signed cert (/etc/pki/tls/certs/localhost.crt)..."
+                    sed -i 's|/etc/letsencrypt/live/example.com/fullchain.pem|/etc/pki/tls/certs/localhost.crt|g' "${APACHE_CONF_FILE}"
+                    sed -i 's|/etc/letsencrypt/live/example.com/privkey.pem|/etc/pki/tls/private/localhost.key|g' "${APACHE_CONF_FILE}"
+                fi
+            fi
         else
             log_info "Existing Apache configuration found at ${APACHE_CONF_FILE} (skipping overwrite to protect domain SSL customisations)."
         fi
@@ -319,6 +405,25 @@ configure_and_restart_services() {
                 fi
             else
                 log_warn "Apache syntax check reported warnings/errors. Please review apachectl configtest."
+            fi
+        fi
+    fi
+
+    # Check for orphan non-systemd processes occupying PORT before restarting
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tulpn | grep -q ":${PORT} "; then
+            if ! systemctl is-active --quiet "${SYSTEMD_SERVICE}"; then
+                local occupying_pid
+                occupying_pid="$(ss -tulpn | grep ":${PORT} " | grep -oP 'pid=\K[0-9]+' | head -n1 || true)"
+                if [[ -n "${occupying_pid}" ]]; then
+                    log_warn "Port ${PORT} is currently occupied by orphan PID ${occupying_pid} while service is inactive."
+                    log_info "Terminating orphan PID ${occupying_pid} to clear port..."
+                    kill -15 "${occupying_pid}" 2>/dev/null || true
+                    sleep 1
+                    if ss -tulpn | grep -q ":${PORT} "; then
+                        kill -9 "${occupying_pid}" 2>/dev/null || true
+                    fi
+                fi
             fi
         fi
     fi
@@ -384,7 +489,6 @@ cleanup_old_releases() {
         local to_remove
         to_remove=$(( count - KEEP_RELEASES ))
         log_info "Removing ${to_remove} obsolete release(s)..."
-        # Sort oldest first and remove
         find . -maxdepth 1 -mindepth 1 -type d -printf '%T@ %p\n' \
             | sort -n \
             | head -n "${to_remove}" \
@@ -414,6 +518,9 @@ cleanup_old_releases() {
 # Main Orchestrator
 # ==============================================================================
 main() {
+    parse_arguments "$@"
+    resolve_source_app_dir
+
     log_info "=========================================================="
     log_info " AlmaLinux 9 Node.js VPS DeployKit - Starting Deployment"
     log_info "=========================================================="

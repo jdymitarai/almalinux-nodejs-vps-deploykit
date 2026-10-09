@@ -153,10 +153,9 @@ chmod +x init_db.sh
 ```
 This script:
 - Creates `/etc/my.cnf.d/99-local-binding.cnf` enforcing `bind-address = 127.0.0.1`.
-- Creates `nodeapp_db` with `utf8mb4_unicode_ci`.
-- Grants least-privilege access to `'nodeapp_user'@'localhost'`.
-- Runs `schema.sql` to establish migrations, users, and audit tables.
-- Validates connection integrity before completing.
+- Grants least-privilege access to both `'nodeapp_user'@'localhost'` (Unix socket) and `'nodeapp_user'@'127.0.0.1'` (TCP loopback).
+- Runs `schema.sql` to establish migrations, users, app settings, and audit tables.
+- Validates connection integrity over loopback TCP before completing.
 
 ---
 
@@ -220,7 +219,7 @@ What `deploy.sh` executes step-by-step:
 3. **Atomic Release Directory**: Creates `/opt/nodeapp/releases/<timestamp>`.
 4. **Symlink Binding**: Links `/opt/nodeapp/shared/.env` and `/opt/nodeapp/shared/logs` into the release.
 5. **Clean Dependency Install**: Runs `npm ci --omit=dev` under user `nodeapp`.
-6. **Atomic Pointer Rotation**: Updates `/opt/nodeapp/previous` to previous release, and swaps `/opt/nodeapp/current` to the new release.
+6. **Atomic Pointer Rotation**: Updates `/opt/nodeapp/previous` to previous release, and swaps `/opt/nodeapp/current` to the new release using atomic rename (`mv -Tf`).
 7. **Systemd Unit Deployment**: Copies `app.service` to `/etc/systemd/system/app.service`, reloads systemd, and starts the service.
 8. **Health Check Gate**: Probes `http://127.0.0.1:3000/health`. If healthy, proceeds. If failed, **triggers automatic rollback** to `/opt/nodeapp/previous`!
 9. **Pruning**: Retains only the last 5 releases to prevent disk depletion.

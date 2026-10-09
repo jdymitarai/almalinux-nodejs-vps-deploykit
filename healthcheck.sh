@@ -6,6 +6,7 @@
 # ==============================================================================
 
 set -euo pipefail
+IFS=$'\n\t'
 
 # Default Configuration Parameters
 HOST="${HOST:-127.0.0.1}"
@@ -23,6 +24,22 @@ C_RED='\033[0;31m'
 C_GREEN='\033[0;32m'
 C_YELLOW='\033[1;33m'
 C_CYAN='\033[0;36m'
+
+log_info() {
+    echo -e "${C_CYAN}[HEALTHCHECK] [INFO]${C_RESET} $*"
+}
+
+log_warn() {
+    echo -e "${C_YELLOW}[HEALTHCHECK] [WARN]${C_RESET} $*"
+}
+
+log_error() {
+    echo -e "${C_RED}[HEALTHCHECK] [ERROR]${C_RESET} $*" >&2
+}
+
+log_success() {
+    echo -e "${C_GREEN}[HEALTHCHECK] [PASS]${C_RESET} $*"
+}
 
 usage() {
     cat <<EOF
@@ -42,88 +59,100 @@ EOF
     exit 0
 }
 
-# Parse Command-Line Options
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -h|--host) HOST="$2"; shift 2 ;;
-        -p|--port) PORT="$2"; shift 2 ;;
-        -u|--path) PATH_URI="$2"; shift 2 ;;
-        -r|--retries) RETRIES="$2"; shift 2 ;;
-        -d|--delay) DELAY="$2"; shift 2 ;;
-        -t|--timeout) TIMEOUT="$2"; shift 2 ;;
-        -s|--service) SERVICE_NAME="$2"; shift 2 ;;
-        --no-service-check) CHECK_SERVICE="no"; shift ;;
-        --help) usage ;;
-        *) echo "Unknown option: $1" >&2; exit 1 ;;
-    esac
-done
-
-TARGET_URL="http://${HOST}:${PORT}${PATH_URI}"
-
-log_info() {
-    echo -e "${C_CYAN}[HEALTHCHECK] [INFO]${C_RESET} $*"
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--host) HOST="$2"; shift 2 ;;
+            -p|--port) PORT="$2"; shift 2 ;;
+            -u|--path) PATH_URI="$2"; shift 2 ;;
+            -r|--retries) RETRIES="$2"; shift 2 ;;
+            -d|--delay) DELAY="$2"; shift 2 ;;
+            -t|--timeout) TIMEOUT="$2"; shift 2 ;;
+            -s|--service) SERVICE_NAME="$2"; shift 2 ;;
+            --no-service-check) CHECK_SERVICE="no"; shift ;;
+            --help) usage ;;
+            *) echo "Unknown option: $1" >&2; exit 1 ;;
+        esac
+    done
 }
 
-log_warn() {
-    echo -e "${C_YELLOW}[HEALTHCHECK] [WARN]${C_RESET} $*"
-}
+verify_systemd_service() {
+    if [[ "${CHECK_SERVICE}" == "no" ]]; then
+        log_info "Systemd service check explicitly bypassed via flag."
+        return 0
+    fi
 
-log_error() {
-    echo -e "${C_RED}[HEALTHCHECK] [ERROR]${C_RESET} $*" >&2
-}
+    if ! command -v systemctl >/dev/null 2>&1; then
+        log_info "systemctl not available on this host; skipping service verification."
+        return 0
+    fi
 
-log_success() {
-    echo -e "${C_GREEN}[HEALTHCHECK] [PASS]${C_RESET} $*"
-}
-
-# 1. Systemd Service State Verification
-if [[ "${CHECK_SERVICE}" != "no" ]]; then
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl list-unit-files "${SERVICE_NAME}" >/dev/null 2>&1; then
-            log_info "Verifying systemd unit status for '${SERVICE_NAME}'..."
-            if systemctl is-active --quiet "${SERVICE_NAME}"; then
-                log_success "Systemd service '${SERVICE_NAME}' is active (running)."
-            else
-                local status_desc
-                status_desc="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || echo "inactive")"
-                log_error "Systemd service '${SERVICE_NAME}' is not running (State: ${status_desc})."
-                systemctl status "${SERVICE_NAME}" --no-pager -n 15 || true
-                exit 1
-            fi
+    # Check if systemd unit exists or is known to systemd
+    if systemctl cat "${SERVICE_NAME}" >/dev/null 2>&1 || [[ -f "/etc/systemd/system/${SERVICE_NAME}" ]]; then
+        log_info "Verifying systemd unit status for '${SERVICE_NAME}'..."
+        if systemctl is-active --quiet "${SERVICE_NAME}"; then
+            log_success "Systemd service '${SERVICE_NAME}' is active (running)."
         else
-            log_info "Systemd unit '${SERVICE_NAME}' not found in unit files; skipping systemd verification."
+            local status_desc
+            status_desc="$(systemctl is-active "${SERVICE_NAME}" 2>/dev/null || echo "inactive")"
+            log_error "Systemd service '${SERVICE_NAME}' is not running (State: ${status_desc})."
+            systemctl status "${SERVICE_NAME}" --no-pager -n 15 || true
+            return 1
         fi
-    fi
-fi
-
-# 2. HTTP Endpoint Verification with Retry Loop
-log_info "Probing health endpoint: ${TARGET_URL} (Max attempts: ${RETRIES}, Timeout: ${TIMEOUT}s)..."
-
-attempt=1
-while [[ ${attempt} -le ${RETRIES} ]]; do
-    log_info "Attempt ${attempt}/${RETRIES}..."
-    
-    # Probe HTTP endpoint capturing HTTP code and response body
-    HTTP_RESPONSE=$(curl -s -S -m "${TIMEOUT}" -w "\n%{http_code}" "${TARGET_URL}" 2>/dev/null || echo -e "\n000")
-    
-    # Split response body and HTTP status code
-    HTTP_CODE=$(echo "${HTTP_RESPONSE}" | tail -n1)
-    RESPONSE_BODY=$(echo "${HTTP_RESPONSE}" | sed '$d')
-
-    if [[ "${HTTP_CODE}" == "200" ]]; then
-        log_success "HTTP status 200 OK received from ${TARGET_URL}"
-        if [[ -n "${RESPONSE_BODY}" ]]; then
-            log_info "Response payload: ${RESPONSE_BODY}"
-        fi
-        exit 0
     else
-        log_warn "Health check attempt ${attempt} returned status: ${HTTP_CODE}"
-        if [[ ${attempt} -lt ${RETRIES} ]]; then
-            sleep "${DELAY}"
-        fi
+        log_info "Systemd unit '${SERVICE_NAME}' not found; skipping service check."
     fi
-    attempt=$((attempt + 1))
-done
+    return 0
+}
 
-log_error "CRITICAL: Health check failed after ${RETRIES} attempts on ${TARGET_URL}."
-exit 1
+verify_http_endpoint() {
+    local target_url="http://${HOST}:${PORT}${PATH_URI}"
+    log_info "Probing health endpoint: ${target_url} (Max attempts: ${RETRIES}, Timeout: ${TIMEOUT}s)..."
+
+    local attempt=1
+    while [[ ${attempt} -le ${RETRIES} ]]; do
+        log_info "Attempt ${attempt}/${RETRIES}..."
+        
+        # Probe HTTP endpoint capturing body and HTTP status code
+        local http_response
+        http_response="$(curl -s -S -m "${TIMEOUT}" -w "\n%{http_code}" "${target_url}" 2>/dev/null || printf "\n000")"
+        
+        local http_code
+        http_code="$(echo "${http_response}" | tail -n1)"
+        local response_body
+        response_body="$(echo "${http_response}" | sed '$d')"
+
+        if [[ "${http_code}" == "200" ]]; then
+            log_success "HTTP status 200 OK received from ${target_url}"
+            if [[ -n "${response_body}" ]]; then
+                log_info "Response payload: ${response_body}"
+            fi
+            return 0
+        else
+            log_warn "Health check attempt ${attempt} returned status: ${http_code}"
+            if [[ ${attempt} -lt ${RETRIES} ]]; then
+                sleep "${DELAY}"
+            fi
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    log_error "CRITICAL: Health check failed after ${RETRIES} attempts on ${target_url}."
+    return 1
+}
+
+main() {
+    parse_arguments "$@"
+
+    if ! verify_systemd_service; then
+        exit 1
+    fi
+
+    if ! verify_http_endpoint; then
+        exit 1
+    fi
+
+    log_success "All health verification checks passed successfully."
+}
+
+main "$@"

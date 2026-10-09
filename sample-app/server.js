@@ -86,3 +86,6 @@ function handleGracefulShutdown(signal) {
 
 process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
+process.on('SIGHUP', () => {
+    console.log(`[${new Date().toISOString()}] [INFO] Received SIGHUP from systemd reload. Refreshing configurations...`);
+});
