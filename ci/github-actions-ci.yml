@@ -1,0 +1,72 @@
+name: CI & Deployment Pipeline Verification
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  validate-scripts:
+    name: Shell Script Syntax & Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Bash Syntax (bash -n)
+        run: |
+          for script in deploy.sh rollback.sh healthcheck.sh init_db.sh; do
+            echo "Checking syntax for ${script}..."
+            bash -n "${script}"
+          done
+
+      - name: Run ShellCheck Static Analysis
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          ignore_paths: 'node_modules'
+          severity: warning
+
+  test-sample-app:
+    name: Reference Node.js Server Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 22.x]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run Sample App Integration Tests
+        working-directory: ./sample-app
+        run: |
+          npm test
+
+  validate-configs:
+    name: Configuration & SQL Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate systemd unit syntax
+        run: |
+          # Basic validation that key directives exist
+          grep -q "ExecStart=" app.service
+          grep -q "Restart=" app.service
+          grep -q "ProtectSystem=" app.service
+          echo "app.service format verified."
+
+      - name: Validate Apache configuration format
+        run: |
+          grep -q "<VirtualHost \*:80>" app.conf
+          grep -q "<VirtualHost \*:443>" app.conf
+          grep -q "ProxyPass" app.conf
+          grep -q "Upgrade=websocket" app.conf
+          echo "app.conf directives verified."

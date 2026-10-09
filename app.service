@@ -1,0 +1,53 @@
+[Unit]
+Description=Production Node.js Application Service (AlmaLinux 9 VPS)
+Documentation=https://github.com/jdymitarai/almalinux-nodejs-vps-deploykit
+After=network.target network-online.target mariadb.service
+Wants=network-online.target mariadb.service
+
+[Service]
+Type=simple
+User=nodeapp
+Group=nodeapp
+WorkingDirectory=/opt/nodeapp/current
+
+# Load environment secrets securely
+EnvironmentFile=/opt/nodeapp/shared/.env
+Environment=NODE_ENV=production
+
+# Process Execution
+ExecStart=/usr/bin/node /opt/nodeapp/current/server.js
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+
+# Robust Process Lifecycle & Auto-Recovery
+Restart=always
+RestartSec=3s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+# Operating System Resource Limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Linux Kernel Security Hardening & Sandboxing
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+# Systemd Journal Structured Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nodeapp
+
+[Install]
+WantedBy=multi-user.target

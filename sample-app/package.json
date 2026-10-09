@@ -1,0 +1,23 @@
+{
+  "name": "sample-nodejs-production-app",
+  "version": "1.0.0",
+  "description": "Production-ready reference Node.js application for AlmaLinux 9 VPS DeployKit",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "nodejs",
+    "almalinux",
+    "rhel",
+    "production",
+    "deploykit"
+  ],
+  "author": "Antigravity Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {}
+}
